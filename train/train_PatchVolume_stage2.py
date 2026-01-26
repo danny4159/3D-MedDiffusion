@@ -72,19 +72,38 @@ def main(cfg_path: str):
         num_sanity_val_steps = 2,
         logger=logger
     )
-    ckpt = torch.load(cfg.model.resume_from_checkpoint)
     model = patchvolumeAE(cfg)
-    model.load_state_dict(ckpt['state_dict'])
+    ckpt_path = cfg.model.resume_from_checkpoint
+    if ckpt_path:
+        ckpt = torch.load(ckpt_path)
+        model.load_state_dict(ckpt['state_dict'])
     model.cfg = cfg
     trainer.fit(model, train_dataloader, val_dataloader)
 
 
 if __name__ == '__main__':
-    
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)
-    args = parser.parse_args()
-    main(args.config)
+    parser.add_argument("--gpus", type=str, default=None, help="GPU devices to use, e.g., [1] or [0,1]")
+    args, unknown = parser.parse_known_args()
 
+    # Load config and override with CLI args
+    cfg = OmegaConf.load(args.config)
+    if args.gpus:
+        # Parse string like "[1]" or "[0,1]" to list
+        import ast
+        cfg.model.gpus = ast.literal_eval(args.gpus)
 
+    # Merge with any additional OmegaConf CLI overrides
+    cli_conf = OmegaConf.from_cli(unknown)
+    cfg = OmegaConf.merge(cfg, cli_conf)
+
+    # Save modified config to temp file
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+        OmegaConf.save(cfg, f)
+        temp_cfg_path = f.name
+
+    main(temp_cfg_path)
 

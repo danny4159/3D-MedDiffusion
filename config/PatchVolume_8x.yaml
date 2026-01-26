@@ -1,10 +1,10 @@
 model:
   seed: 1234
-  batch_size: 24
+  batch_size: 2
   num_workers: 8
 
   gpus: 1
-  default_root_dir: input/your/results/dir
+  default_root_dir: results/PatchVolume_8x
   resume_from_checkpoint: 
   max_steps: 1000000
   max_epochs: 10000
@@ -32,7 +32,7 @@ model:
   stage: 1
 
 dataset:
-  root_dir: 3DMedDiffusion/config/PatchVolume_data.json
+  root_dir: config/PatchVolume_SynthRad_data.json
   image_channels: 1
   imgtype: CT
   patch_size: 64

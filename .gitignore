@@ -1,0 +1,24 @@
+*.ckpt
+
+*.nii.gz
+
+*.pyc
+__pycache__/
+
+# TensorBoard logs
+events.out.tfevents.*
+*.tfevents.*
+
+# Training outputs and logs
+input/
+output/
+results/
+logs/
+lightning_logs/
+
+# PyTorch Lightning
+hparams.yaml
+*.pt
+*.pth
+
+data/*

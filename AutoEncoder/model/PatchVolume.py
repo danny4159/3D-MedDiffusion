@@ -139,14 +139,19 @@ class patchvolumeAE(pl.LightningModule):
         self.save_hyperparameters()
 
     def encode(self, x, include_embeddings=False, quantize=True):
-        h = self.pre_vq_conv(self.encoder(x))
+        # x: (B, C, D, H, W) e.g., (1, 1, 512, 512, 512)
+        h = self.pre_vq_conv(self.encoder(x)) # pre_vq_conv == nn.Conv3d
+        # encoder output: (B, n_hiddens, D/downsample, H/downsample, W/downsample) e.g., (1, 256, 64, 64, 64)
+        # h: (B, embedding_dim, D/downsample, H/downsample, W/downsample) e.g., (1, 8, 64, 64, 64)
         if quantize:
             vq_output = self.codebook(h)
+            # vq_output['embeddings']: (B, embedding_dim, D/downsample, H/downsample, W/downsample) e.g., (1, 8, 64, 64, 64)
+            # vq_output['encodings']: (B, D/downsample, H/downsample, W/downsample) - VQ indices e.g., (1, 64, 64, 64)
             if include_embeddings:
                 return vq_output['embeddings'], vq_output['encodings']
             else:
-                return vq_output['encodings']
-        return h
+                return vq_output['encodings']  # return VQ indices only
+        return h  # return before VQ quantization
         
     def patch_encode(self, x,quantize = False,patch_size = 64):
         b,s1,s2,s3 = x.shape[0],x.shape[-3],x.shape[-2],x.shape[-1]
@@ -404,6 +409,8 @@ class patchvolumeAE(pl.LightningModule):
         x, x_rec = self(x, log_volume=True, val=(kwargs['split']=='val'))
         log["inputs"] = x
         log["reconstructions"] = x_rec
+        # Keep a ground-truth copy for visualization even when input is the target.
+        log["gt"] = batch.get('gt', x)
 
         return log
 
@@ -483,15 +490,15 @@ class Encoder(nn.Module):
 
         self.out_channels = out_channels
     def forward(self, x):
-        h = self.conv_first(x)
-        for idx , block in enumerate(self.conv_blocks):
-            h = block.res1(h)
-            h = block.res2(h)
-            h = block.down(h)
-        h = self.mid_block.res1(h)
-        h = self.mid_block.attn(h)
-        h = self.mid_block.res2(h)
-        h = self.final_block(h)
+        h = self.conv_first(x) # nn.Conv3d
+        for idx , block in enumerate(self.conv_blocks): 
+            h = block.res1(h) # ResBlock
+            h = block.res2(h) # ResBlock
+            h = block.down(h) # nn.Conv3d
+        h = self.mid_block.res1(h) # ResBlock
+        h = self.mid_block.attn(h) # AttentionBlock (모든 Voxel간의 self-attention)
+        h = self.mid_block.res2(h) # ResBlock
+        h = self.final_block(h) # nn.Conv3d
         return h
 
 class Decoder(nn.Module):

@@ -1,0 +1,20 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Train PatchVolume Stage2 (3DMedDiffusion)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/train/train_PatchVolume_stage2.py",
+            "args": [
+                "--config",
+                "config/PatchVolume_4x_s2.yaml",
+                "--gpus",
+                "[3]"
+            ],
+            "python": "/home/daniel/anaconda3/envs/3DMedDiffusion/bin/python",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        }
+    ]
+}

@@ -32,66 +32,71 @@ class Codebook(nn.Module):
             x = x + torch.randn_like(x) * std
         return x
 
-    def _init_embeddings(self, z):
+    def _init_embeddings(self, z): # codebook 초기화
         # z: [b, c, t, h, w]
         self._need_init = False
-        flat_inputs = shift_dim(z, 1, -1).flatten(end_dim=-2)
-        y = self._tile(flat_inputs)
+        flat_inputs = shift_dim(z, 1, -1).flatten(end_dim=-2)  # [bthw, c]
+        y = self._tile(flat_inputs)  # [bthw, c] (or repeated)
 
-        d = y.shape[0]
-        _k_rand = y[torch.randperm(y.shape[0])][:self.n_codes]
+        d = y.shape[0]  # bthw
+        _k_rand = y[torch.randperm(y.shape[0])][:self.n_codes]  # [n_codes, c] - random shuffle & select first n_codes
         if dist.is_initialized():
             dist.broadcast(_k_rand, 0)
-        self.embeddings.data.copy_(_k_rand)
-        self.z_avg.data.copy_(_k_rand)
-        self.N.data.copy_(torch.ones(self.n_codes))
+        self.embeddings.data.copy_(_k_rand)  # [n_codes, c] - initialize codebook
+        self.z_avg.data.copy_(_k_rand)  # [n_codes, c]
+        self.N.data.copy_(torch.ones(self.n_codes))  # [n_codes]
 
     def forward(self, z):
         # z: [b, c, t, h, w]
         if self._need_init and self.training:
-            self._init_embeddings(z)
+            self._init_embeddings(z) # codebook 초기화
         flat_inputs = shift_dim(z, 1, -1).flatten(end_dim=-2)  # [bthw, c]
+        
+        # ||flat_inputs - embeddings||² = x² - 2xy + y²
         distances = (flat_inputs ** 2).sum(dim=1, keepdim=True) \
             - 2 * flat_inputs @ self.embeddings.t() \
-            + (self.embeddings.t() ** 2).sum(dim=0, keepdim=True)  # [bthw, c]
+            + (self.embeddings.t() ** 2).sum(dim=0, keepdim=True)  # [bthw, n_codes]
 
-        encoding_indices = torch.argmin(distances, dim=1)
+        encoding_indices = torch.argmin(distances, dim=1)  # [bthw] - closest codebook index
         encode_onehot = F.one_hot(encoding_indices, self.n_codes).type_as(
-            flat_inputs)  # [bthw, ncode]
+            flat_inputs)  # [bthw, n_codes]
         encoding_indices = encoding_indices.view(
-            z.shape[0], *z.shape[2:])  # [b, t, h, w, ncode]
+            z.shape[0], *z.shape[2:])  # [b, t, h, w] - reshape back to spatial dims
 
-        embeddings = F.embedding(
-            encoding_indices, self.embeddings)  # [b, t, h, w, c]
-        embeddings = shift_dim(embeddings, -1, 1)  # [b, c, t, h, w]
+        embeddings = F.embedding(  # 선택된 가장 가까운 codebook으로 치환
+            encoding_indices, self.embeddings)  # [b, t, h, w, c] - lookup from codebook
+        embeddings = shift_dim(embeddings, -1, 1)  # [b, c, t, h, w] - move channel to position 1
 
-        commitment_loss = 0.25 * F.mse_loss(z, embeddings.detach())
+        commitment_loss = 0.25 * F.mse_loss(z, embeddings.detach()) # loss. encoder가 codebook에 맞도록 학습 유도. codebook을 업데이트 하는 용도는 아님 (embeddings.detach())
 
-        # EMA codebook update
+        # EMA codebook update: exponential moving average로 codebook 업데이트
         if self.training:
-            n_total = encode_onehot.sum(dim=0)
-            encode_sum = flat_inputs.t() @ encode_onehot
+            n_total = encode_onehot.sum(dim=0)  # [n_codes] - 각 코드가 몇 번 사용됐는지
+            encode_sum = flat_inputs.t() @ encode_onehot  # [c, bthw] @ [bthw, n_codes] = [c, n_codes] # 코드별로 배정된 latent 벡터의 합
             if dist.is_initialized():
-                dist.all_reduce(n_total)
-                dist.all_reduce(encode_sum)
+                dist.all_reduce(n_total)  # multi-GPU: 모든 GPU의 count 합산
+                dist.all_reduce(encode_sum)  # multi-GPU: 모든 GPU의 sum 합산
 
-            self.N.data.mul_(0.99).add_(n_total, alpha=0.01)
-            self.z_avg.data.mul_(0.99).add_(encode_sum.t(), alpha=0.01)
+            # EMA 업데이트: 0.99 * old + 0.01 * new
+            self.N.data.mul_(0.99).add_(n_total, alpha=0.01)  # [n_codes] - 사용 횟수 EMA
+            self.z_avg.data.mul_(0.99).add_(encode_sum.t(), alpha=0.01)  # [n_codes, c] - 평균 벡터 EMA
 
-            n = self.N.sum()
-            weights = (self.N + 1e-7) / (n + self.n_codes * 1e-7) * n
-            encode_normalized = self.z_avg / weights.unsqueeze(1)
-            self.embeddings.data.copy_(encode_normalized)
+            # Codebook normalization by usage frequency
+            n = self.N.sum()  # scalar - 총 사용 횟수
+            weights = (self.N + 1e-7) / (n + self.n_codes * 1e-7) * n  # [n_codes] - normalize weights
+            encode_normalized = self.z_avg / weights.unsqueeze(1)  # [n_codes, c] / [n_codes, 1] = [n_codes, c]
+            self.embeddings.data.copy_(encode_normalized)  # [n_codes, c] - 업데이트된 codebook
 
-            y = self._tile(flat_inputs)
-            _k_rand = y[torch.randperm(y.shape[0])][:self.n_codes]
+            # Random restart for unused codes (codebook collapse 방지)
+            y = self._tile(flat_inputs)  # [bthw', c] - tile for diversity
+            _k_rand = y[torch.randperm(y.shape[0])][:self.n_codes]  # [n_codes, c] - random samples
             if dist.is_initialized():
                 dist.broadcast(_k_rand, 0)
 
             if not self.no_random_restart:
-                usage = (self.N.view(self.n_codes, 1)
-                         >= self.restart_thres).float()
-                self.embeddings.data.mul_(usage).add_(_k_rand * (1 - usage))
+                usage = (self.N.view(self.n_codes, 1)  # [n_codes, 1]
+                         >= self.restart_thres).float()  # [n_codes, 1] - 1 if used, 0 if unused
+                self.embeddings.data.mul_(usage).add_(_k_rand * (1 - usage))  # unused codes → random restart
 
         embeddings_st = (embeddings - z).detach() + z
 
